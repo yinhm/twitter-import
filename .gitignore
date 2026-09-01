@@ -1,0 +1,10 @@
+/twitter-import
+*.db
+*.jsonl
+/api-key
+/operator-key
+/getx-api-key
+__pycache__/
+*.pyc
+*.swp
+output

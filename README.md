@@ -32,9 +32,12 @@ user unless `--limit` is explicitly changed.
 The TSV maps immutable Twitter user IDs to canonical FriendFeed Feed UUIDs:
 
 ```text
-feed_id  feed_uuid  twitter_username  twitter_user_id
-alice    9e43d39c-2358-40a4-80ab-08a79a7b21e2  AliceX  42
+feed_id  feed_uuid  twitter_username  twitter_user_id  boundary_tweet_id  boundary_at
+alice    9e43d39c-2358-40a4-80ab-08a79a7b21e2  AliceX  42  100  2026-01-12T13:44:55Z
 ```
+
+The optional boundary columns are a fixed snapshot exported from ffdb. Normal
+sync stops at that tweet ID or timestamp; `--full` ignores the boundary.
 
 `collect` calls GetXAPI's `/twitter/user/tweets` endpoint by numeric user ID,
 expands `t.co` entities, downloads supported Twitter media, and writes one
@@ -53,8 +56,8 @@ may instead be provided through `GETXAPI_KEY`.
 ```
 
 For each user, `sync` reads newest posts first and imports them sequentially.
-The first server replay ends that user's scan, so an ordinary run does not pay
-to traverse established history. It examines at most 100 posts per user per
+The fixed TSV boundary or first server replay ends that user's scan, so an
+ordinary run does not pay to traverse established history. It examines at most 100 posts per user per
 run. The default output directory is `./output`; use `--output` to change it.
 Each paid page is atomically saved before import as
 `<twitter-user-id>/page-<first>-<last>.zip`. State and reports are stored as
@@ -64,11 +67,13 @@ account, ready for production replay through the existing `batch` command.
 
 An ordinary run always checks the newest page and preserves unfinished older
 work. Use `--resume` to consume saved local ZIPs and their continuation cursors
-without first making a new paid request. Multiple unfinished runs are kept as
-a per-user stack, so a new latest check cannot overwrite an older gap. A page
-that contains newly created entries is retained; a replay-only page is removed.
-After a saved ZIP is exhausted, `--resume` follows its `NextCursor` and may make
-new paid GetXAPI requests; it avoids duplicate reads but is not a zero-cost mode.
+first. Users without pending work start from their newest page normally, so
+`--resume` does not skip first-time accounts. Multiple unfinished runs are kept
+as a per-user stack, so a new latest check cannot overwrite an older gap. A
+page that contains newly created entries is retained; a replay-only page is
+removed. After a saved ZIP is exhausted, `--resume` follows its `NextCursor`
+and may make new paid GetXAPI requests; it avoids duplicate reads but is not a
+zero-cost mode.
 
 Use `--full` only for an intentional full traversal. It removes the per-user
 limit, clears pending incremental continuations, ignores replay boundaries,
@@ -83,6 +88,10 @@ later posts or accounts. Media download failures are recorded as
 exhausted temporary failures still stop the run without advancing that item.
 This degradation applies only to `sync`; `collect` fails if media cannot be
 downloaded because its purpose is to produce a complete offline bundle.
+For multi-account sync, a GetXAPI 401/403/404 is recorded as
+`account_unavailable` and only skips that account. A 429, 5xx, or network
+failure still stops the run. If every account is unavailable, the command exits
+non-zero so a credential or plan failure cannot look successful.
 
 The GetXAPI key and FriendFeed operator token are separate credentials. Both
 files must be regular mode-0600 files. Neither credential is written to the

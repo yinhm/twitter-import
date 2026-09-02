@@ -29,7 +29,8 @@ const (
 )
 
 type Account struct {
-	FeedID, FeedUUID, Username, UserID string
+	FeedID, FeedUUID, Username, UserID, BoundaryTweetID string
+	BoundaryAt                                          time.Time
 }
 
 type Media struct {
@@ -58,6 +59,18 @@ type Client struct {
 	Endpoint string
 	Key      string
 	HTTP     *http.Client
+}
+
+type HTTPError struct {
+	Operation  string
+	StatusCode int
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("%s: HTTP %d", e.Operation, e.StatusCode) }
+
+func IsAccountUnavailable(err error) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden || httpErr.StatusCode == http.StatusNotFound)
 }
 
 type apiTweet struct {
@@ -111,15 +124,27 @@ func ReadAccounts(path string) ([]Account, error) {
 	seen := make(map[string]bool)
 	for line, row := range rows[1:] {
 		value := func(name string) string {
-			index := columns[name]
+			index, ok := columns[name]
+			if !ok {
+				return ""
+			}
 			if index >= len(row) {
 				return ""
 			}
 			return strings.TrimSpace(row[index])
 		}
-		account := Account{FeedID: value("feed_id"), FeedUUID: value("feed_uuid"), Username: strings.TrimPrefix(value("twitter_username"), "@"), UserID: value("twitter_user_id")}
+		account := Account{FeedID: value("feed_id"), FeedUUID: value("feed_uuid"), Username: strings.TrimPrefix(value("twitter_username"), "@"), UserID: value("twitter_user_id"), BoundaryTweetID: value("boundary_tweet_id")}
 		if !uuid(account.FeedUUID) || account.Username == "" || !decimal(account.UserID) {
 			return nil, fmt.Errorf("invalid account at TSV line %d", line+2)
+		}
+		if raw := value("boundary_at"); raw != "" {
+			account.BoundaryAt, err = time.Parse(time.RFC3339Nano, raw)
+			if err != nil {
+				return nil, fmt.Errorf("invalid boundary_at at TSV line %d: %w", line+2, err)
+			}
+		}
+		if account.BoundaryTweetID != "" && !decimal(account.BoundaryTweetID) {
+			return nil, fmt.Errorf("invalid boundary_tweet_id at TSV line %d", line+2)
 		}
 		key := account.FeedUUID + "\x00" + account.UserID
 		if !seen[key] {
@@ -146,7 +171,7 @@ func (c *Client) UserTweets(ctx context.Context, userID, cursor string) (Page, e
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return Page{}, fmt.Errorf("GetXAPI user tweets: HTTP %d", response.StatusCode)
+		return Page{}, &HTTPError{Operation: "GetXAPI user tweets", StatusCode: response.StatusCode}
 	}
 	var raw struct {
 		UserID     string     `json:"userId"`

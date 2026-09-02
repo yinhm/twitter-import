@@ -21,11 +21,12 @@ import (
 )
 
 type reportRecord struct {
-	ItemID  string `json:"item_id"`
-	Result  string `json:"result"`
-	EntryID string `json:"entry_id,omitempty"`
-	At      string `json:"at"`
-	Error   string `json:"error,omitempty"`
+	AccountID string `json:"account_id,omitempty"`
+	ItemID    string `json:"item_id,omitempty"`
+	Result    string `json:"result"`
+	EntryID   string `json:"entry_id,omitempty"`
+	At        string `json:"at"`
+	Error     string `json:"error,omitempty"`
 }
 
 func usage() {

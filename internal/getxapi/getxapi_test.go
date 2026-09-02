@@ -5,12 +5,29 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/yinhm/twitter-import/internal/archive"
 	"github.com/yinhm/twitter-import/internal/getxapi"
 )
+
+func TestReadAccountsAcceptsFixedSyncBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accounts.tsv")
+	data := "feed_id\tfeed_uuid\ttwitter_username\ttwitter_user_id\tboundary_tweet_id\tboundary_at\n" +
+		"alice\t9e43d39c-2358-40a4-80ab-08a79a7b21e2\talice\t42\t100\t2026-01-12T13:44:55Z\n"
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := getxapi.ReadAccounts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || accounts[0].BoundaryTweetID != "100" || accounts[0].BoundaryAt.IsZero() {
+		t.Fatalf("accounts=%+v", accounts)
+	}
+}
 
 func TestUserTweetsMapsAndWritesImportBundle(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -63,5 +80,21 @@ func TestUserTweetsRejectsWrongAuthor(t *testing.T) {
 	api := &getxapi.Client{Endpoint: server.URL, Key: "secret", HTTP: server.Client()}
 	if _, err := api.UserTweets(context.Background(), "42", ""); err == nil {
 		t.Fatal("expected author mismatch")
+	}
+}
+
+func TestUserTweetsClassifiesUnavailableAccount(t *testing.T) {
+	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(statusCode)
+			}))
+			defer server.Close()
+			api := &getxapi.Client{Endpoint: server.URL, Key: "secret", HTTP: server.Client()}
+			_, err := api.UserTweets(context.Background(), "42", "")
+			if !getxapi.IsAccountUnavailable(err) {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	}
 }

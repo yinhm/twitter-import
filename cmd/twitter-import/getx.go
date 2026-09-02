@@ -212,9 +212,21 @@ func runSync(args []string) error {
 	reporter := bufio.NewWriter(report)
 	getX := &getxapi.Client{Endpoint: *getXEndpoint, Key: getXKey, HTTP: getXHTTP()}
 	ctx := context.Background()
+	unavailable := 0
 	for index, account := range accounts {
 		counts, err := syncAccount(ctx, getX, account, *endpoint, operatorKey, *output, statePath, &state, reporter, *limit, *full, *resume, *noMedia)
 		if err != nil {
+			if getxapi.IsAccountUnavailable(err) {
+				unavailable++
+				if reportErr := appendSyncReport(reporter, reportRecord{AccountID: account.UserID, Result: "account_unavailable", At: time.Now().UTC().Format(time.RFC3339Nano), Error: err.Error()}); reportErr != nil {
+					return reportErr
+				}
+				if manifestErr := writeReplayManifest(*output, accounts); manifestErr != nil {
+					return manifestErr
+				}
+				fmt.Printf("synced=%d/%d user=@%s account_unavailable=true\n", index+1, len(accounts), account.Username)
+				continue
+			}
 			if manifestErr := writeReplayManifest(*output, accounts); manifestErr != nil {
 				return fmt.Errorf("sync @%s: %v; rebuild replay manifest: %w", account.Username, err, manifestErr)
 			}
@@ -225,6 +237,9 @@ func runSync(args []string) error {
 		}
 		fmt.Printf("synced=%d/%d user=@%s created=%d replayed=%d replies_skipped=%d rejected=%d media_missing=%d capped=%t resumed=%t\n", index+1, len(accounts), account.Username, counts.Created, counts.Replayed, counts.Replies, counts.Rejected, counts.MediaMissing, counts.Capped, *resume)
 	}
+	if unavailable == len(accounts) {
+		return errors.New("GetXAPI denied every account; check the credential, plan, and account availability")
+	}
 	return nil
 }
 
@@ -232,14 +247,10 @@ func syncAccount(ctx context.Context, getX *getxapi.Client, account getxapi.Acco
 	var counts syncCounts
 	key := account.FeedUUID + "\x00" + account.UserID
 	positions := state.Positions[key]
-	if resume && len(positions) == 0 {
-		fmt.Printf("user=@%s nothing_to_resume=true\n", account.Username)
-		return counts, nil
-	}
 	if full {
 		positions = nil
 	}
-	if !resume {
+	if len(positions) == 0 || (!resume && (positions[0].Archive != "" || positions[0].Cursor != "")) {
 		positions = append([]syncPosition{{}}, positions...)
 	}
 	state.Positions[key] = positions
@@ -299,7 +310,7 @@ func syncAccount(ctx context.Context, getX *getxapi.Client, account getxapi.Acco
 		if err != nil {
 			return counts, err
 		}
-		processed, complete, replay, err := processSyncArchive(ctx, archivePath, position.Skip, api, reporter, full, limit-examined, &counts, func(skip int, keep bool) error {
+		processed, complete, replay, err := processSyncArchive(ctx, archivePath, position.Skip, api, account, reporter, full, limit-examined, &counts, func(skip int, keep bool) error {
 			current := state.Positions[key]
 			current[0].Skip, current[0].Keep = skip, current[0].Keep || keep
 			state.Positions[key] = current
@@ -452,7 +463,7 @@ func writeReplayManifest(output string, accounts []getxapi.Account) error {
 	return writePrivateJSON(filepath.Join(output, "manifest.json"), manifest)
 }
 
-func processSyncArchive(ctx context.Context, path string, skip int, api *client.Client, reporter *bufio.Writer, full bool, remaining int, counts *syncCounts, progress func(int, bool) error) (processed int, complete, replay bool, err error) {
+func processSyncArchive(ctx context.Context, path string, skip int, api *client.Client, account getxapi.Account, reporter *bufio.Writer, full bool, remaining int, counts *syncCounts, progress func(int, bool) error) (processed int, complete, replay bool, err error) {
 	reader, err := archive.Open(path)
 	if err != nil {
 		return 0, false, false, err
@@ -469,6 +480,16 @@ func processSyncArchive(ctx context.Context, path string, skip int, api *client.
 		}
 		index++
 		processed++
+		if !full && (tweet.ID == account.BoundaryTweetID || (!account.BoundaryAt.IsZero() && !tweet.CreatedAt.After(account.BoundaryAt))) {
+			counts.Replayed++
+			if err := appendSyncReport(reporter, reportRecord{ItemID: tweet.ID, Result: "boundary_reached", At: time.Now().UTC().Format(time.RFC3339Nano)}); err != nil {
+				return err
+			}
+			if err := progress(index, false); err != nil {
+				return err
+			}
+			return stopAtReplay
+		}
 		if tweet.ReplyTo != "" {
 			counts.Replies++
 			return progress(index, false)

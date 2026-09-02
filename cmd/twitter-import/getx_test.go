@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -83,18 +84,17 @@ func TestSyncStopsCurrentUserAtReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 		imported = append(imported, metadata.Source.ItemID)
-		created := metadata.Source.ItemID != "101"
-		_ = json.NewEncoder(w).Encode(map[string]any{"created": created, "data": map[string]string{"id": "entry"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"created": true, "data": map[string]string{"id": "entry"}})
 	}))
 	defer ff.Close()
 	statePath := filepath.Join(output, "state.json")
 	state := syncState{Version: 1, Positions: make(map[string][]syncPosition)}
 	api := &getxapi.Client{Endpoint: getX.URL, Key: "getx", HTTP: getX.Client()}
-	counts, err := syncAccount(context.Background(), api, getxapi.Account{FeedUUID: "feed-uuid", UserID: "42"}, ff.URL, "operator", output, statePath, &state, nil, 100, false, false, true)
+	counts, err := syncAccount(context.Background(), api, getxapi.Account{FeedUUID: "feed-uuid", UserID: "42", BoundaryTweetID: "102"}, ff.URL, "operator", output, statePath, &state, nil, 100, false, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.Created != 2 || counts.Replayed != 1 || counts.Capped || len(imported) != 3 || len(state.Positions) != 0 {
+	if counts.Created != 1 || counts.Replayed != 1 || counts.Capped || len(imported) != 1 || imported[0] != "103" || len(state.Positions) != 0 {
 		t.Fatalf("counts=%+v imported=%v state=%v", counts, imported, state.Positions)
 	}
 	if _, err := os.Stat(filepath.Join(output, "42", "page-103-101.zip")); err != nil {
@@ -123,12 +123,24 @@ func TestLatestSyncPreservesOlderContinuation(t *testing.T) {
 	}
 }
 
-func TestResumeWithoutPendingDoesNotReadGetXAPI(t *testing.T) {
+func TestResumeWithoutPendingStartsAtNewestPage(t *testing.T) {
+	getX := fakeGetX(t, []string{"101"})
+	defer getX.Close()
+	posts := 0
+	ff := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts++
+		_ = json.NewEncoder(w).Encode(map[string]any{"created": true, "data": map[string]string{"id": "entry"}})
+	}))
+	defer ff.Close()
 	output := t.TempDir()
 	state := syncState{Version: 1, Positions: make(map[string][]syncPosition)}
-	api := &getxapi.Client{Endpoint: "http://127.0.0.1:1", Key: "getx", HTTP: http.DefaultClient}
-	if _, err := syncAccount(context.Background(), api, getxapi.Account{FeedUUID: "feed-uuid", UserID: "42", Username: "alice"}, "http://127.0.0.1:1", "operator", output, filepath.Join(output, "state.json"), &state, nil, 100, false, true, true); err != nil {
+	api := &getxapi.Client{Endpoint: getX.URL, Key: "getx", HTTP: getX.Client()}
+	counts, err := syncAccount(context.Background(), api, getxapi.Account{FeedUUID: "feed-uuid", UserID: "42", Username: "alice"}, ff.URL, "operator", output, filepath.Join(output, "state.json"), &state, nil, 100, false, true, true)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if counts.Created != 1 || posts != 1 {
+		t.Fatalf("counts=%+v posts=%d", counts, posts)
 	}
 }
 
@@ -282,6 +294,55 @@ func TestSyncRecordsPermanentContentFailureAndContinues(t *testing.T) {
 	}
 	if counts.Created != 1 || counts.Rejected != 1 || posts != 2 {
 		t.Fatalf("counts=%+v posts=%d", counts, posts)
+	}
+}
+
+func TestSyncContinuesAfterUnavailableAccount(t *testing.T) {
+	directory := t.TempDir()
+	accounts := filepath.Join(directory, "accounts.tsv")
+	if err := os.WriteFile(accounts, []byte("feed_id\tfeed_uuid\ttwitter_username\ttwitter_user_id\n"+
+		"blocked\t9e43d39c-2358-40a4-80ab-08a79a7b21e2\tblocked\t42\n"+
+		"working\tae67a1f6-11ee-459e-b64f-b41e7a8f2238\tworking\t43\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	getXKey, operatorKey := filepath.Join(directory, "getx-key"), filepath.Join(directory, "operator-key")
+	for _, path := range []string{getXKey, operatorKey} {
+		if err := os.WriteFile(path, []byte("secret\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	getX := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userID := r.URL.Query().Get("userId")
+		if userID == "42" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"userId": userID, "has_more": false, "tweets": []any{
+			map[string]any{"id": "101", "url": "https://x.com/a/status/101", "text": "post", "createdAt": "Mon Jan 12 13:44:55 +0000 2026", "author": map[string]string{"id": userID}},
+		}})
+	}))
+	defer getX.Close()
+	posts := 0
+	ff := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts++
+		_ = json.NewEncoder(w).Encode(map[string]any{"created": true, "data": map[string]string{"id": "entry"}})
+	}))
+	defer ff.Close()
+	output := filepath.Join(directory, "output")
+	err := runSync([]string{"--accounts-file", accounts, "--endpoint", ff.URL, "--getxapi-key-file", getXKey,
+		"--operator-key-file", operatorKey, "--getxapi-endpoint", getX.URL, "--output", output, "--no-media"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if posts != 1 {
+		t.Fatalf("posts=%d", posts)
+	}
+	report, err := os.ReadFile(filepath.Join(output, "twitter-sync.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(report), `"account_id":"42"`) || !strings.Contains(string(report), `"result":"account_unavailable"`) {
+		t.Fatalf("report=%s", report)
 	}
 }
 

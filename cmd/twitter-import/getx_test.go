@@ -207,6 +207,27 @@ func TestReplayManifestListsRetainedPages(t *testing.T) {
 	}
 }
 
+func TestManifestCommandRequiresFreshStateDirectory(t *testing.T) {
+	output := t.TempDir()
+	accounts := filepath.Join(output, "accounts.tsv")
+	const feedUUID = "9e43d39c-2358-40a4-80ab-08a79a7b21e2"
+	if err := os.WriteFile(accounts, []byte("feed_id\tfeed_uuid\ttwitter_username\ttwitter_user_id\n"+
+		"alice\t"+feedUUID+"\talice\t42\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	account := getxapi.Account{FeedUUID: feedUUID, UserID: "42"}
+	if _, _, err := writeSyncPage(output, account, []getxapi.Tweet{{ID: "102", AccountID: "42", CreatedAt: "2026-01-01T00:00:00Z"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--accounts-file", accounts, "--output", output, "--state-dir", "prod-state", "--report", "prod.jsonl"}
+	if err := runManifest(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := runManifest(args); err == nil {
+		t.Fatal("second manifest build reused a state directory")
+	}
+}
+
 func TestSyncResumesInsidePaidPageAfterLimit(t *testing.T) {
 	getX := fakeGetX(t, []string{"103", "102", "101"})
 	defer getX.Close()

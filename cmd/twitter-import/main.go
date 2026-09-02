@@ -30,7 +30,7 @@ type reportRecord struct {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: twitter-import inspect ARCHIVE | import ARCHIVE [flags] | batch MANIFEST [flags] | collect [flags] | sync [flags]")
+	fmt.Fprintln(os.Stderr, "usage: twitter-import inspect ARCHIVE | import ARCHIVE [flags] | batch MANIFEST [flags] | collect [flags] | sync [flags] | manifest [flags]")
 }
 
 func main() {
@@ -62,6 +62,8 @@ func main() {
 		err = runCollect(os.Args[2:])
 	case "sync":
 		err = runSync(os.Args[2:])
+	case "manifest":
+		err = runManifest(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)

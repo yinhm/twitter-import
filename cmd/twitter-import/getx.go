@@ -428,6 +428,10 @@ func writeReplayManifest(output string, accounts []getxapi.Account) error {
 	if err := os.MkdirAll(filepath.Join(output, "replay-state"), 0700); err != nil {
 		return err
 	}
+	return writeReplayManifestTo(output, accounts, "replay-state", "production-replay.jsonl")
+}
+
+func writeReplayManifestTo(output string, accounts []getxapi.Account, stateDirectory, report string) error {
 	manifest := batchManifest{Version: 1}
 	for _, account := range accounts {
 		directory := filepath.Join(output, account.UserID)
@@ -458,7 +462,7 @@ func writeReplayManifest(output string, accounts []getxapi.Account) error {
 			manifest.Imports = append(manifest.Imports, batchImport{
 				SourceType: "twitter-import-v1",
 				Archive:    relative, TargetFeed: account.FeedUUID,
-				State: filepath.Join("replay-state", account.UserID+".db"), Report: "production-replay.jsonl",
+				State: filepath.Join(stateDirectory, account.UserID+".db"), Report: report,
 				BoundaryTweetID: account.BoundaryTweetID,
 				BoundaryAt:      formatOptionalTime(account.BoundaryAt),
 			})
@@ -471,6 +475,32 @@ func writeReplayManifest(output string, accounts []getxapi.Account) error {
 		return nil
 	}
 	return writePrivateJSON(filepath.Join(output, "manifest.json"), manifest)
+}
+
+func runManifest(args []string) error {
+	flags := flag.NewFlagSet("manifest", flag.ContinueOnError)
+	accountsPath := flags.String("accounts-file", "", "production TSV mapping Twitter users to target Feed UUIDs")
+	output := flags.String("output", "output", "directory containing retained page ZIPs")
+	stateDirectory := flags.String("state-dir", "production-replay-state", "new checkpoint directory under output")
+	report := flags.String("report", "production-replay.jsonl", "report filename under output")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *accountsPath == "" || filepath.Base(*stateDirectory) != *stateDirectory || filepath.Base(*report) != *report {
+		return errors.New("--accounts-file and simple --state-dir/--report names are required")
+	}
+	accounts, err := getxapi.ReadAccounts(*accountsPath)
+	if err != nil {
+		return err
+	}
+	if err := os.Mkdir(filepath.Join(*output, *stateDirectory), 0700); err != nil {
+		return fmt.Errorf("create fresh replay state directory: %w", err)
+	}
+	if err := writeReplayManifestTo(*output, accounts, *stateDirectory, *report); err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s with fresh state directory %s\n", filepath.Join(*output, "manifest.json"), filepath.Join(*output, *stateDirectory))
+	return nil
 }
 
 func formatOptionalTime(value time.Time) string {

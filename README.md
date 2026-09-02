@@ -56,9 +56,10 @@ may instead be provided through `GETXAPI_KEY`.
 ```
 
 For each user, `sync` reads newest posts first and imports them sequentially.
-The fixed TSV boundary or first server replay ends that user's scan, so an
-ordinary run does not pay to traverse established history. It examines at most 100 posts per user per
-run. The default output directory is `./output`; use `--output` to change it.
+When the TSV has a fixed boundary, only that boundary ends the scan; earlier
+server replays are counted and traversal continues. Without a fixed boundary,
+the first server replay ends the scan. It examines at most 100 posts per user
+per run. The default output directory is `./output`; use `--output` to change it.
 Each paid page is atomically saved before import as
 `<twitter-user-id>/page-<first>-<last>.zip`. State and reports are stored as
 `twitter-sync.json` and `twitter-sync.jsonl` in the same directory.
@@ -89,9 +90,10 @@ exhausted temporary failures still stop the run without advancing that item.
 This degradation applies only to `sync`; `collect` fails if media cannot be
 downloaded because its purpose is to produce a complete offline bundle.
 For multi-account sync, a GetXAPI 401/403/404 is recorded as
-`account_unavailable` and only skips that account. A 429, 5xx, or network
-failure still stops the run. If every account is unavailable, the command exits
-non-zero so a credential or plan failure cannot look successful.
+`account_unavailable` and skips that account. Any other account-level failure is
+recorded as `sync_failed`; the remaining accounts still run, then the command
+exits non-zero. If every account is unavailable, the command also exits non-zero
+so a credential or plan failure cannot look successful.
 
 The GetXAPI key and FriendFeed operator token are separate credentials. Both
 files must be regular mode-0600 files. Neither credential is written to the

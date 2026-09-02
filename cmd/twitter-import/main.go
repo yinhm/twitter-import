@@ -74,6 +74,8 @@ func main() {
 
 type importOptions struct {
 	archive, endpoint, key, state, report, target string
+	boundaryTweetID                               string
+	boundaryAt                                    time.Time
 	limit                                         int
 	includeReplies                                bool
 }
@@ -84,12 +86,14 @@ type batchManifest struct {
 }
 
 type batchImport struct {
-	SourceType     string `json:"source_type"`
-	Archive        string `json:"archive"`
-	TargetFeed     string `json:"target_feed"`
-	State          string `json:"state"`
-	Report         string `json:"report"`
-	IncludeReplies bool   `json:"include_replies"`
+	SourceType      string `json:"source_type"`
+	Archive         string `json:"archive"`
+	TargetFeed      string `json:"target_feed"`
+	State           string `json:"state"`
+	Report          string `json:"report"`
+	BoundaryTweetID string `json:"boundary_tweet_id,omitempty"`
+	BoundaryAt      string `json:"boundary_at,omitempty"`
+	IncludeReplies  bool   `json:"include_replies"`
 }
 
 func inspect(path string) error {
@@ -265,17 +269,25 @@ func runBatch(manifestPath string, args []string) error {
 			return fmt.Errorf("manifest import %d has unsupported source_type %q", i+1, item.SourceType)
 		}
 		fmt.Printf("import=%d/%d target=%s archive=%s\n", i+1, len(manifest.Imports), item.TargetFeed, item.Archive)
+		var boundaryAt time.Time
+		if item.BoundaryAt != "" {
+			boundaryAt, err = time.Parse(time.RFC3339Nano, item.BoundaryAt)
+			if err != nil {
+				return fmt.Errorf("manifest import %d has invalid boundary_at: %w", i+1, err)
+			}
+		}
 		if !*apply {
-			eligible, replies, err := previewImport(resolve(item.Archive), item.IncludeReplies, *limit)
+			eligible, replies, boundary, err := previewImport(resolve(item.Archive), item.IncludeReplies, item.BoundaryTweetID, boundaryAt, *limit)
 			if err != nil {
 				return fmt.Errorf("preview import %d target %q: %w", i+1, item.TargetFeed, err)
 			}
-			fmt.Printf("would_process=%d replies_skipped=%d\n", eligible, replies)
+			fmt.Printf("would_process=%d replies_skipped=%d boundary_skipped=%d\n", eligible, replies, boundary)
 			continue
 		}
 		if err := executeImport(importOptions{
 			archive: resolve(item.Archive), endpoint: *endpoint, key: key,
 			state: resolve(item.State), report: resolve(item.Report), target: item.TargetFeed,
+			boundaryTweetID: item.BoundaryTweetID, boundaryAt: boundaryAt,
 			limit: *limit, includeReplies: item.IncludeReplies,
 		}); err != nil {
 			return fmt.Errorf("import %d target %q: %w", i+1, item.TargetFeed, err)
@@ -287,17 +299,21 @@ func runBatch(manifestPath string, args []string) error {
 	return nil
 }
 
-func previewImport(archivePath string, includeReplies bool, limit int) (int, int, error) {
+func previewImport(archivePath string, includeReplies bool, boundaryTweetID string, boundaryAt time.Time, limit int) (int, int, int, error) {
 	reader, err := archive.Open(archivePath)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	defer reader.Close()
 	if reader.ScopeID() == "" {
-		return 0, 0, errors.New("source scope is missing")
+		return 0, 0, 0, errors.New("source scope is missing")
 	}
-	eligible, replies := 0, 0
+	eligible, replies, boundary := 0, 0, 0
 	_, err = reader.Iterate(func(tweet archive.Tweet) error {
+		if tweet.ID == boundaryTweetID || (!boundaryAt.IsZero() && !tweet.CreatedAt.After(boundaryAt)) {
+			boundary++
+			return nil
+		}
 		if tweet.ReplyTo != "" && !includeReplies {
 			replies++
 			return nil
@@ -307,7 +323,7 @@ func previewImport(archivePath string, includeReplies bool, limit int) (int, int
 		}
 		return nil
 	})
-	return eligible, replies, err
+	return eligible, replies, boundary, err
 }
 
 func executeImport(options importOptions) error {
@@ -358,6 +374,9 @@ func executeImport(options importOptions) error {
 	writer := bufio.NewWriter(report)
 	processed := 0
 	_, err = reader.Iterate(func(tweet archive.Tweet) error {
+		if tweet.ID == options.boundaryTweetID || (!options.boundaryAt.IsZero() && !tweet.CreatedAt.After(options.boundaryAt)) {
+			return nil
+		}
 		if options.limit > 0 && processed >= options.limit {
 			return nil
 		}

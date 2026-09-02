@@ -212,7 +212,7 @@ func runSync(args []string) error {
 	reporter := bufio.NewWriter(report)
 	getX := &getxapi.Client{Endpoint: *getXEndpoint, Key: getXKey, HTTP: getXHTTP()}
 	ctx := context.Background()
-	unavailable := 0
+	unavailable, failed := 0, 0
 	for index, account := range accounts {
 		counts, err := syncAccount(ctx, getX, account, *endpoint, operatorKey, *output, statePath, &state, reporter, *limit, *full, *resume, *noMedia)
 		if err != nil {
@@ -227,10 +227,15 @@ func runSync(args []string) error {
 				fmt.Printf("synced=%d/%d user=@%s account_unavailable=true\n", index+1, len(accounts), account.Username)
 				continue
 			}
+			failed++
+			if reportErr := appendSyncReport(reporter, reportRecord{AccountID: account.UserID, Result: "sync_failed", At: time.Now().UTC().Format(time.RFC3339Nano), Error: err.Error()}); reportErr != nil {
+				return reportErr
+			}
 			if manifestErr := writeReplayManifest(*output, accounts); manifestErr != nil {
 				return fmt.Errorf("sync @%s: %v; rebuild replay manifest: %w", account.Username, err, manifestErr)
 			}
-			return fmt.Errorf("sync @%s: %w", account.Username, err)
+			fmt.Printf("synced=%d/%d user=@%s failed=true error=%q\n", index+1, len(accounts), account.Username, err)
+			continue
 		}
 		if err := writeReplayManifest(*output, accounts); err != nil {
 			return err
@@ -239,6 +244,9 @@ func runSync(args []string) error {
 	}
 	if unavailable == len(accounts) {
 		return errors.New("GetXAPI denied every account; check the credential, plan, and account availability")
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d of %d accounts failed; see %s", failed, len(accounts), reportPath)
 	}
 	return nil
 }
@@ -451,6 +459,8 @@ func writeReplayManifest(output string, accounts []getxapi.Account) error {
 				SourceType: "twitter-import-v1",
 				Archive:    relative, TargetFeed: account.FeedUUID,
 				State: filepath.Join("replay-state", account.UserID+".db"), Report: "production-replay.jsonl",
+				BoundaryTweetID: account.BoundaryTweetID,
+				BoundaryAt:      formatOptionalTime(account.BoundaryAt),
 			})
 		}
 	}
@@ -461,6 +471,13 @@ func writeReplayManifest(output string, accounts []getxapi.Account) error {
 		return nil
 	}
 	return writePrivateJSON(filepath.Join(output, "manifest.json"), manifest)
+}
+
+func formatOptionalTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 func processSyncArchive(ctx context.Context, path string, skip int, api *client.Client, account getxapi.Account, reporter *bufio.Writer, full bool, remaining int, counts *syncCounts, progress func(int, bool) error) (processed int, complete, replay bool, err error) {
@@ -513,7 +530,7 @@ func processSyncArchive(ctx context.Context, path string, skip int, api *client.
 		if err := progress(index, full); err != nil {
 			return err
 		}
-		if !full {
+		if !full && account.BoundaryTweetID == "" && account.BoundaryAt.IsZero() {
 			return stopAtReplay
 		}
 		return nil

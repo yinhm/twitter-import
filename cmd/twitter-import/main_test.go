@@ -201,6 +201,18 @@ func TestRunBatchDefaultsToDryRunAndAppliesExplicitTargets(t *testing.T) {
 	if posts != 1 {
 		t.Fatalf("posts=%d", posts)
 	}
+	manifest["imports"].([]map[string]any)[0]["state"] = "bounded.db"
+	manifest["imports"].([]map[string]any)[0]["boundary_at"] = "2020-08-18T00:00:00Z"
+	raw, _ = json.Marshal(manifest)
+	if err := os.WriteFile(manifestPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runBatch(manifestPath, append(args, "--apply")); err != nil {
+		t.Fatal(err)
+	}
+	if posts != 1 {
+		t.Fatalf("boundary did not prevent import: posts=%d", posts)
+	}
 }
 
 func TestRunImportSkipsRepliesUnlessForced(t *testing.T) {
